@@ -100,7 +100,6 @@
       text-align: center;
     }
 
-    /* Slider ω sota vels, més gruixut */
     .omega-wrap {
       display: flex;
       align-items: center;
@@ -211,7 +210,6 @@
         vₓ: <span id="vx">0.00</span> m/s · vᵧ: <span id="vy">0.00</span> m/s
       </div>
 
-      <!-- Slider ω sota vels: esquerra = ω>0, dreta = ω<0 -->
       <div class="omega-wrap">
         <label for="omegaSlider">ω:</label>
         <input id="omegaSlider" type="range" min="-1" max="1" step="0.01" value="0" />
@@ -240,8 +238,9 @@
 
     // ===== Config =====
     const MAP_RESOLUTION = 0.01;      // m/px
-    const ROBOT_RADIUS   = 5;         // px
-    const SPEED_VECTOR_SCALE = 1.0;   // m per (m/s) per la fletxa (senzill)
+    const ROBOT_LEN   = 0.30;         // 30 cm (forward, X)
+    const ROBOT_WID   = 0.20;         // 20 cm (lateral, Y)
+    const SPEED_VECTOR_GAIN = 0.5;    // metres de fletxa per (m/s)
     const maxSpeed = 0.3;             // m/s
     const maxTurn  = 0.4;             // rad/s
     const distanceFactor = 75;        // joystick
@@ -254,22 +253,32 @@
     let mapImage = new Image();
     let latestScan = null;
 
-    // Pose centrada i orientació relativa
-    let lastRobotX = 0;      // en metres, frame display X (forward inicial)
-    let lastRobotY = 0;      // en metres, frame display Y (dreta/esquerra segons conversió)
-    let lastRobotYaw = 0;    // yaw relatiu (0 = forward inicial)
-
+    // Origen i heading inicial
     let odomCenterSet = false;
     let odomCenterX = 0;
     let odomCenterY = 0;
 
     let yawOffsetSet = false;
     let yawOffset = 0;
+    let cosYaw0 = 1;
+    let sinYaw0 = 0;
+
+    // Pose en frame de dibuix:
+    // +X = forward inicial (amunt), +Y = dreta inicial
+    let lastRobotX = 0;
+    let lastRobotY = 0;
+    let lastRobotYaw = 0;   // relatiu a heading inicial
 
     function getRosbridgeAddress() {
       const currentUrl = window.location.href;
       const rosbridgeUrl = currentUrl.replace(/\/webpage\/?$/, '/rosbridge/');
       return rosbridgeUrl.replace(/^http/, 'ws').replace(/^https/, 'wss');
+    }
+
+    function quaternionToYaw(q) {
+      const siny_cosp = 2 * (q.w * q.z + q.x * q.y);
+      const cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z);
+      return Math.atan2(siny_cosp, cosy_cosp);
     }
 
     function connectToROS() {
@@ -330,12 +339,6 @@
       });
     }
 
-    function quaternionToYaw(q) {
-      const siny_cosp = 2 * (q.w * q.z + q.x * q.y);
-      const cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z);
-      return Math.atan2(siny_cosp, cosy_cosp);
-    }
-
     function setupTopics() {
       // cmd_vel
       cmdVelTopic = new ROSLIB.Topic({
@@ -355,69 +358,71 @@
           "data:image/jpeg;base64," + message.data;
       });
 
-      // Odometry
+      // Odom
       const odomTopic = new ROSLIB.Topic({
         ros: ros,
         name: '/odom',
         messageType: 'nav_msgs/msg/Odometry'
       });
       odomTopic.subscribe((message) => {
-        const position = message.pose.pose.position;
-        const orientation = message.pose.pose.orientation;
-        const twist = message.twist.twist;
+        const p = message.pose.pose.position;
+        const o = message.pose.pose.orientation;
+        const t = message.twist.twist;
 
-        const yawAbs = quaternionToYaw(orientation);
+        const yawAbs = quaternionToYaw(o);
 
-        // Centrat a primer odom
         if (!odomCenterSet) {
-          odomCenterX = position.x;
-          odomCenterY = position.y;
+          odomCenterX = p.x;
+          odomCenterY = p.y;
           odomCenterSet = true;
         }
 
-        // Orientació inicial com a referència (forward inicial = +X display)
         if (!yawOffsetSet) {
           yawOffset = yawAbs;
+          cosYaw0 = Math.cos(yawOffset);
+          sinYaw0 = Math.sin(yawOffset);
           yawOffsetSet = true;
         }
 
         const yawRel = yawAbs - yawOffset;
         lastRobotYaw = yawRel;
 
-        // Frame display:
-        // +X_display = endavant inicial
-        // +Y_display = dreta inicial
-        // A partir de les coords odom (x,y), definim:
-        const dx = position.x - odomCenterX;   // X odom (forward)
-        const dy = position.y - odomCenterY;   // Y odom (left)
+        const dx = p.x - odomCenterX;
+        const dy = p.y - odomCenterY;
 
-        // Projectem al frame inicial:
-        // Com volem només centrat (no rotar mapa global), usem directament:
-        lastRobotX = dx;       // endavant (+X)
-        lastRobotY = -dy;      // dreta = -left
+        // Frame inicial: X_rel (forward inicial), Y_left_rel (esquerra inicial)
+        const X_rel =  cosYaw0 * dx + sinYaw0 * dy;
+        const Y_left_rel = -sinYaw0 * dx + cosYaw0 * dy;
+
+        // Display: +X amunt, +Y dreta
+        lastRobotX = X_rel;
+        lastRobotY = -Y_left_rel;
 
         document.getElementById('position-x').textContent = lastRobotX.toFixed(2);
         document.getElementById('position-y').textContent = lastRobotY.toFixed(2);
         document.getElementById('rotation-z').textContent =
           (lastRobotYaw * 180 / Math.PI).toFixed(1);
 
-        // Velocitat en base_link (x forward, y left)
-        const vx_body = twist.linear.x;
-        const vy_body = twist.linear.y;
+        // Velocitat base_link (x forward, y left)
+        const vx_b = t.linear.x;
+        const vy_b = t.linear.y;
 
-        // A món relatiu (usant yawRel)
-        const cosY = Math.cos(yawRel);
-        const sinY = Math.sin(yawRel);
-        const vx_world = vx_body * cosY - vy_body * sinY;
-        const vy_world_left = vx_body * sinY + vy_body * cosY;
-        const vy_world = -vy_world_left; // dreta positiva
+        const c = Math.cos(yawRel);
+        const s = Math.sin(yawRel);
+
+        // Globals al frame inicial
+        const vx_rel = vx_b * c - vy_b * s;
+        const vy_left_rel = vx_b * s + vy_b * c;
+
+        const vx_disp = vx_rel;
+        const vy_disp = -vy_left_rel;
 
         drawRobotState(lastRobotX, lastRobotY,
-                       vx_world, vy_world,
+                       vx_disp, vy_disp,
                        lastRobotYaw, latestScan);
       });
 
-      // LiDAR /scan
+      // LiDAR
       const scanTopic = new ROSLIB.Topic({
         ros: ros,
         name: '/scan',
@@ -433,8 +438,8 @@
       if (!canvas) return;
 
       const dpr = window.devicePixelRatio || 1;
-      const cssW = canvas.clientWidth || canvas.width;
-      const cssH = canvas.clientHeight || canvas.height;
+      const cssW = canvas.clientWidth || canvas.width || 200;
+      const cssH = canvas.clientHeight || canvas.height || cssW;
 
       canvas.width  = Math.round(cssW * dpr);
       canvas.height = Math.round(cssH * dpr);
@@ -450,7 +455,6 @@
       return [px, py];
     }
 
-    // Eixos al centre, ticks 0.30 m
     function drawAxes(ctx, W, H) {
       const cx = W / 2;
       const cy = H / 2;
@@ -461,7 +465,7 @@
 
       ctx.save();
 
-      // Eix X (vermell, vertical)
+      // Eix X (vermell)
       ctx.strokeStyle = 'red';
       ctx.lineWidth = 1.5;
       ctx.beginPath();
@@ -469,51 +473,36 @@
       ctx.lineTo(cx, H);
       ctx.stroke();
 
-      // Tics X
-      const maxXTicks = Math.floor((H / 2) / tickPx);
-      for (let i = 1; i <= maxXTicks; i++) {
-        const yUp = cy - i * tickPx;
-        const yDn = cy + i * tickPx;
-
-        ctx.beginPath();
-        ctx.moveTo(cx - tickLen, yUp);
-        ctx.lineTo(cx + tickLen, yUp);
-        ctx.stroke();
-
-        ctx.beginPath();
-        ctx.moveTo(cx - tickLen, yDn);
-        ctx.lineTo(cx + tickLen, yDn);
-        ctx.stroke();
-      }
-
-      // Eix Y (verd, horitzontal)
+      // Eix Y (verd)
       ctx.strokeStyle = 'green';
       ctx.beginPath();
       ctx.moveTo(0, cy);
       ctx.lineTo(W, cy);
       ctx.stroke();
 
-      // Tics Y
+      // Ticks X
+      ctx.strokeStyle = 'red';
+      const maxXTicks = Math.floor((H / 2) / tickPx);
+      for (let i = 1; i <= maxXTicks; i++) {
+        const yUp = cy - i * tickPx;
+        const yDn = cy + i * tickPx;
+        ctx.beginPath(); ctx.moveTo(cx - tickLen, yUp); ctx.lineTo(cx + tickLen, yUp); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(cx - tickLen, yDn); ctx.lineTo(cx + tickLen, yDn); ctx.stroke();
+      }
+
+      // Ticks Y
+      ctx.strokeStyle = 'green';
       const maxYTicks = Math.floor((W / 2) / tickPx);
       for (let i = 1; i <= maxYTicks; i++) {
         const xR = cx + i * tickPx;
         const xL = cx - i * tickPx;
-
-        ctx.beginPath();
-        ctx.moveTo(xR, cy - tickLen);
-        ctx.lineTo(xR, cy + tickLen);
-        ctx.stroke();
-
-        ctx.beginPath();
-        ctx.moveTo(xL, cy - tickLen);
-        ctx.lineTo(xL, cy + tickLen);
-        ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(xR, cy - tickLen); ctx.lineTo(xR, cy + tickLen); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(xL, cy - tickLen); ctx.lineTo(xL, cy + tickLen); ctx.stroke();
       }
 
       ctx.restore();
     }
 
-    // Dibuix complet
     function drawRobotState(robotX, robotY, velX, velY, yawRel, scanMsg) {
       const canvas = document.getElementById('map-canvas');
       const ctx = canvas.getContext('2d');
@@ -529,8 +518,12 @@
 
       drawAxes(ctx, W, H);
 
-      // --- LiDAR ---
-      if (scanMsg) {
+      // Precompute robot en frame inicial relatiu
+      const X_rel = robotX;
+      const Y_left_rel = -robotY;
+
+      // ---- LiDAR ----
+      if (scanMsg && yawOffsetSet && odomCenterSet) {
         const angleMin = scanMsg.angle_min;
         const angleInc = scanMsg.angle_increment;
         const rangeMin = scanMsg.range_min;
@@ -544,13 +537,24 @@
           const r = ranges[i];
           if (!isFinite(r) || r < rangeMin || r > rangeMax) continue;
 
-          const angle = angleMin + i * angleInc;
-          const globalAngle = yawRel + angle;
+          const a = angleMin + i * angleInc;
 
-          const wx = robotX + r * Math.cos(globalAngle);
-          const wy = robotY + r * Math.sin(globalAngle);
+          // Punt en robot frame (X forward, Y left)
+          const x_r = r * Math.cos(a);
+          const y_r = r * Math.sin(a);
 
-          const [px, py] = worldToPixel(wx, wy, W, H);
+          const c = Math.cos(yawRel);
+          const s = Math.sin(yawRel);
+
+          // En frame inicial rel
+          const Xp_rel = X_rel + c * x_r - s * y_r;
+          const Yp_left_rel = Y_left_rel + s * x_r + c * y_r;
+
+          // A display: +Y dreta
+          const Xd = Xp_rel;
+          const Yd = -Yp_left_rel;
+
+          const [px, py] = worldToPixel(Xd, Yd, W, H);
           if (px >= 0 && px <= W && py >= 0 && py <= H) {
             ctx.fillRect(px, py, 2, 2);
           }
@@ -559,47 +563,70 @@
         ctx.restore();
       }
 
-      // --- Robot cercle ---
-      const [robotPx, robotPy] = worldToPixel(robotX, robotY, W, H);
+      // ---- Robot rectangle 30x20 cm ----
+      const [cx, cy] = worldToPixel(robotX, robotY, W, H);
+      const hx = ROBOT_LEN / 2;
+      const hy = ROBOT_WID / 2;
+
+      const corners = [
+        [ hx,  hy],
+        [ hx, -hy],
+        [-hx, -hy],
+        [-hx,  hy]
+      ];
+
+      ctx.save();
       ctx.beginPath();
-      ctx.arc(robotPx, robotPy, ROBOT_RADIUS, 0, Math.PI * 2);
-      ctx.fillStyle = 'green';
-      ctx.fill();
+      for (let i = 0; i < corners.length; i++) {
+        const [xr, yr] = corners[i];
+        const c = Math.cos(yawRel);
+        const s = Math.sin(yawRel);
+        const Xw = robotX + c * xr - s * yr;
+        const Yw = robotY + s * xr + c * yr;
+        const [px, py] = worldToPixel(Xw, Yw, W, H);
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(0, 255, 0, 0.4)';
       ctx.strokeStyle = 'black';
+      ctx.lineWidth = 1.5;
+      ctx.fill();
       ctx.stroke();
+      ctx.restore();
 
-      // --- Fletxa orientació (blava) ---
-      const arrowLen = 0.15; // m
-      const tipX = robotX + arrowLen * Math.cos(yawRel);
-      const tipY = robotY + arrowLen * Math.sin(yawRel);
-      const [ax, ay] = worldToPixel(tipX, tipY, W, H);
+      // ---- Orientació (blava) ----
+      const arrowLen = 0.20;
+      {
+        const Xtip = robotX + Math.cos(yawRel) * arrowLen;
+        const Ytip = robotY + Math.sin(yawRel) * arrowLen;
+        const [ax, ay] = worldToPixel(Xtip, Ytip, W, H);
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(ax, ay);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = 'blue';
+        ctx.stroke();
+      }
 
-      ctx.beginPath();
-      ctx.moveTo(robotPx, robotPy);
-      ctx.lineTo(ax, ay);
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = 'blue';
-      ctx.stroke();
-
-      // --- Vector velocitat (vermell) ---
+      // ---- Vector velocitat (vermell) ----
       const speed = Math.hypot(velX, velY);
       if (speed > 0.01) {
-        const len_m = speed * SPEED_VECTOR_SCALE;
-        const vx = robotX + len_m * (velX / speed);
-        const vy = robotY + len_m * (velY / speed);
-        const [vxPx, vyPx] = worldToPixel(vx, vy, W, H);
+        const len_m = speed * SPEED_VECTOR_GAIN;
+        const Xv = robotX + (velX / speed) * len_m;
+        const Yv = robotY + (velY / speed) * len_m;
+        const [vx_px, vy_px] = worldToPixel(Xv, Yv, W, H);
 
         ctx.beginPath();
-        ctx.moveTo(robotPx, robotPy);
-        ctx.lineTo(vxPx, vyPx);
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(vx_px, vy_px);
         ctx.lineWidth = 2;
         ctx.strokeStyle = 'red';
         ctx.stroke();
 
-        // capçal de fletxa alineat
-        const ang = Math.atan2(vyPx - robotPy, vxPx - robotPx);
+        const ang = Math.atan2(vy_px - cy, vx_px - cx);
         ctx.save();
-        ctx.translate(vxPx, vyPx);
+        ctx.translate(vx_px, vy_px);
         ctx.rotate(ang);
         ctx.beginPath();
         ctx.moveTo(0, 0);
@@ -622,12 +649,12 @@
         vy *= s;
       }
 
+      if (!cmdVelTopic) return;
       const twist = new ROSLIB.Message({
         linear:  { x: vx, y: vy, z: 0 },
         angular: { x: 0, y: 0, z: currentAngularZ }
       });
-
-      if (cmdVelTopic) cmdVelTopic.publish(twist);
+      cmdVelTopic.publish(twist);
     }
 
     function setupControls() {
@@ -647,7 +674,7 @@
       j.on('move', (evt, data) => {
         const ratio = Math.min(data.distance / distanceFactor, 1.0);
         const a = data.angle.radian;
-        // Amunt: +vx, Dreta: vy negatiu, Esquerra: vy positiu
+        // Amunt: +vx, Dreta: vy negatiu
         currentLinearX = Math.sin(a) * maxSpeed * ratio;
         currentLinearY = -Math.cos(a) * maxSpeed * ratio;
         vxSpan.textContent = currentLinearX.toFixed(2);
