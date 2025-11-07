@@ -364,34 +364,33 @@
         // Relatiu en frame ROS (X forward, Y esquerra)
         const dx_ros = position.x - odomCenterX;
         const dy_ros = position.y - odomCenterY;
-
         const yawRel = yawAbs - yawOffset;
 
         lastRobotX_ros = dx_ros;
         lastRobotY_ros = dy_ros;
 
-        // Frame de DISPLAY: X = X_ros, Y = -Y_ros (dreta)
+        // Frame display: X = X_ros, Y = -Y_ros (dreta)
         lastRobotX = dx_ros;
         lastRobotY = -dy_ros;
         lastRobotYaw = yawRel;
 
-        // Mostra numèrica en frame display
+        // Mostra numèrica
         document.getElementById('position-x').textContent = lastRobotX.toFixed(2);
         document.getElementById('position-y').textContent = lastRobotY.toFixed(2);
         document.getElementById('rotation-z').textContent =
           (lastRobotYaw * 180 / Math.PI).toFixed(1);
 
-        // Velocitats:
+        // Velocitat en cos
         const vx_body = twist.linear.x;  // forward
         const vy_body = twist.linear.y;  // esquerra (ROS)
 
-        // A món (ROS)
+        // A món (ROS relatiu)
         const vx_ros =
           vx_body * Math.cos(yawRel) - vy_body * Math.sin(yawRel);
         const vy_ros =
           vx_body * Math.sin(yawRel) + vy_body * Math.cos(yawRel);
 
-        // A display: Y invertit
+        // A display: invertim Y
         const vx_disp = vx_ros;
         const vy_disp = -vy_ros;
 
@@ -529,11 +528,11 @@
 
           const angle = angleMin + i * angleInc;
 
-          // En món (ROS relatiu)
+          // Posició en món (ROS relatiu)
           const wx_ros = lastRobotX_ros + r * Math.cos(yawRel + angle);
           const wy_ros = lastRobotY_ros + r * Math.sin(yawRel + angle);
 
-          // A display: Y invertit
+          // A display: invertim Y
           const wx = wx_ros;
           const wy = -wy_ros;
 
@@ -549,8 +548,8 @@
       // --- Robot com a rectangle ---
       const [cx, cy] = worldToPixel(robotX, robotY, W, H);
 
-      const hx = ROBOT_LEN_M / 2; // semi-longitud (X)
-      const hy = ROBOT_WID_M / 2; // semi-amplada (Y)
+      const hx = ROBOT_LEN_M / 2;
+      const hy = ROBOT_WID_M / 2;
       const cornersRobot = [
         [ hx,  hy],
         [ hx, -hy],
@@ -589,15 +588,16 @@
       ctx.strokeStyle = 'blue';
       ctx.stroke();
 
-      // --- Vector velocitat (en frame display) ---
+      // --- Vector velocitat (fletxa vermella) ---
       const speed = Math.hypot(velX, velY);
       if (speed > 0.01) {
-        const angle = Math.atan2(velY, velX);
+        const angle_world = Math.atan2(velY, velX);  // en frame display
         const len_m = Math.min(speed * SPEED_VECTOR_GAIN, 0.5);
-        const vx_m = robotX + len_m * Math.cos(angle);
-        const vy_m = robotY + len_m * Math.sin(angle);
+        const vx_m = robotX + len_m * Math.cos(angle_world);
+        const vy_m = robotY + len_m * Math.sin(angle_world);
         const [vx_px, vy_px] = worldToPixel(vx_m, vy_m, W, H);
 
+        // Línia
         ctx.beginPath();
         ctx.moveTo(cx, cy);
         ctx.lineTo(vx_px, vy_px);
@@ -605,9 +605,13 @@
         ctx.strokeStyle = 'red';
         ctx.stroke();
 
+        // Angle en coordenades de canvas (x dreta, y avall)
+        const arrowAngle = Math.atan2(vy_px - cy, vx_px - cx);
+
+        // Arrowhead alineat EXACTAMENT amb la línia
         ctx.save();
         ctx.translate(vx_px, vy_px);
-        ctx.rotate(-angle);
+        ctx.rotate(arrowAngle);
         ctx.beginPath();
         ctx.moveTo(0, 0);
         ctx.lineTo(-8, 4);
