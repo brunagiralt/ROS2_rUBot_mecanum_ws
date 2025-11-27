@@ -14,7 +14,7 @@ class RobotSelfControl(Node):
         self.declare_parameter('distance_limit', 0.3)
         self.declare_parameter('speed_factor', 1.0)
         self.declare_parameter('forward_speed', 0.2)
-        self.declare_parameter('side_speed', 0.2)            # ➜ Speed for holonomic strafe
+        self.declare_parameter('side_speed', 0.15)
         self.declare_parameter('rotation_speed', 0.3)
         self.declare_parameter('time_to_stop', 5.0)
 
@@ -27,7 +27,7 @@ class RobotSelfControl(Node):
 
         self._msg = Twist()
         self._msg.linear.x = self._forwardSpeed * self._speedFactor
-        self._msg.linear.y = 0.0                      # ➜ IMPORTANT: holonomic axis
+        self._msg.linear.y = 0.0
         self._msg.angular.z = 0.0
 
         self._cmdVel = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -73,8 +73,19 @@ class RobotSelfControl(Node):
         angle_min_deg = scan.angle_min * 180.0 / math.pi
         angle_inc_deg = scan.angle_increment * 180.0 / math.pi
 
-        # Filter valid readings
-        custom_range = []
+        # Inicializamos distancias por zonas
+        zones = {
+            "FRONT": [],
+            "FRONT_LEFT": [],
+            "FRONT_RIGHT": [],
+            "LEFT": [],
+            "RIGHT": [],
+            "BACK_LEFT": [],
+            "BACK_RIGHT": [],
+            "BACK": []
+        }
+
+        # Clasificación de todos los puntos
         for i, dist in enumerate(scan.ranges):
             angle_deg = angle_min_deg + i * angle_inc_deg
             if angle_deg > 180:
@@ -85,69 +96,67 @@ class RobotSelfControl(Node):
             if dist < scan.range_min or dist > scan.range_max:
                 continue
 
-            if -150 < angle_deg < 150:
-                custom_range.append((dist, angle_deg))
+            # Clasificamos ángulo en zonas
+            if -30 <= angle_deg <= 30:
+                zones["FRONT"].append(dist)
+            elif -60 < angle_deg <= -30:
+                zones["FRONT_RIGHT"].append(dist)
+            elif -120 < angle_deg <= -60:
+                zones["RIGHT"].append(dist)
+            elif -150 < angle_deg <= -120:
+                zones["BACK_RIGHT"].append(dist)
+            elif 30 < angle_deg <= 60:
+                zones["FRONT_LEFT"].append(dist)
+            elif 60 < angle_deg <= 120:
+                zones["LEFT"].append(dist)
+            elif 120 < angle_deg <= 150:
+                zones["BACK_LEFT"].append(dist)
+            else:
+                zones["BACK"].append(dist)
 
-        if not custom_range:
-            return
+        # Tomamos la distancia mínima en cada zona
+        zone_min = {
+            z: min(dist_list) if dist_list else 999.0   # Si no hay lecturas, asumimos que está despejado
+            for z, dist_list in zones.items()
+        }
 
-        closest_distance, angle_closest = min(custom_range)
-
-        # ZONE classification
-        if -45 <= angle_closest <= 45:
-            zone = "FRONT"
-        elif 45 < angle_closest <= 110:
-            zone = "LEFT"
-        elif -110 <= angle_closest < -45:
-            zone = "RIGHT"
-        elif 110 < angle_closest <= 150:
-            zone = "BACK_LEFT"
-        elif -150 <= angle_closest < -110:
-            zone = "BACK_RIGHT"
-        else:
-            zone = "OUTSIDE"
-
-        now = self.get_clock().now().nanoseconds * 1e-9
-        if now - self._last_info_time >= 1:
-            self.get_logger().info(
-                f"[DETECTION] d={closest_distance:.2f}m | ang={angle_closest:.0f}° | zone={zone}"
-            )
-            self._last_info_time = now
-
-        # ---------------------------
-        #   HOLOMONIC REACTION LOGIC
-        # ---------------------------
-        if closest_distance < self._distanceLimit:
-
-            if zone == "FRONT":
-                # Move backward + strafe randomly to escape
-                self._msg.linear.x = -self._forwardSpeed * self._speedFactor
-                self._msg.linear.y = self._sideSpeed * self._speedFactor
-                self._msg.angular.z = 0.0
-
-            elif zone == "LEFT":
-                # Strafe RIGHT
-                self._msg.linear.x = 0.0
-                self._msg.linear.y = -self._sideSpeed * self._speedFactor
-                self._msg.angular.z = 0.0
-
-            elif zone == "RIGHT":
-                # Strafe LEFT
-                self._msg.linear.x = 0.0
-                self._msg.linear.y = self._sideSpeed * self._speedFactor
-                self._msg.angular.z = 0.0
-
-            elif zone in ["BACK_LEFT", "BACK_RIGHT"]:
-                # Move forward
-                self._msg.linear.x = self._forwardSpeed * self._speedFactor
-                self._msg.linear.y = 0.0
-                self._msg.angular.z = 0.0
-
-        else:
-            # DEFAULT: Move forward holonomically
+        # Si el frente está despejado → avanzamos
+        if zone_min["FRONT"] > self._distanceLimit:
             self._msg.linear.x = self._forwardSpeed * self._speedFactor
             self._msg.linear.y = 0.0
             self._msg.angular.z = 0.0
+            return
+
+        # ------------------------------------------------------
+        #   ELECCIÓN: mover hacia la zona MÁS DESPEJADA
+        # ------------------------------------------------------
+        best_zone = max(zone_min, key=zone_min.get)  # zona con mayor distancia mínima
+
+        # Reacción según la zona más libre
+        if best_zone == "LEFT":
+            self._msg.linear.x = 0.0
+            self._msg.linear.y = self._sideSpeed
+            self._msg.angular.z = 0.2
+
+        elif best_zone == "RIGHT":
+            self._msg.linear.x = 0.0
+            self._msg.linear.y = -self._sideSpeed
+            self._msg.angular.z = -0.2
+
+        elif best_zone in ["FRONT_LEFT", "BACK_LEFT"]:
+            self._msg.linear.x = 0.0
+            self._msg.linear.y = self._sideSpeed
+            self._msg.angular.z = 0.2
+
+        elif best_zone in ["FRONT_RIGHT", "BACK_RIGHT"]:
+            self._msg.linear.x = 0.0
+            self._msg.linear.y = -self._sideSpeed
+            self._msg.angular.z = -0.2
+
+        elif best_zone == "BACK":
+            self._msg.linear.x = -self._forwardSpeed
+            self._msg.linear.y = 0.0
+            self._msg.angular.z = 0.2
 
     def stop(self):
         self._shutting_down = True
