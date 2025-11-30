@@ -12,16 +12,16 @@ class WallFollower(Node):
 
         # Parameters
         self.declare_parameter('distance_limit', 0.5)    # desired distance to right wall
-        self.declare_parameter('forward_speed', 0.20)    # linear speed
-        self.declare_parameter('turn_speed', 0.40)       # angular speed
+        self.declare_parameter('forward_speed', 0.2)
+        self.declare_parameter('side_speed', 0.2)
+        self.declare_parameter('rotation_speed', 0.3)
         self.declare_parameter('time_to_stop', 30.0)     # auto-stop
-        self.declare_parameter('tolerance', 0.05)        # band around base_distance (RIGHT)
 
         self.base_distance = float(self.get_parameter('distance_limit').value)
-        self.v_lin = float(self.get_parameter('forward_speed').value)
-        self.v_ang = float(self.get_parameter('turn_speed').value)
+        self.forwardSpeed = float(self.get_parameter('forward_speed').value)
+        self.sideSpeed = self.get_parameter('side_speed').value
+        self.rotationSpeed = self.get_parameter('rotation_speed').value
         self.time_to_stop = float(self.get_parameter('time_to_stop').value)
-        self.tol = float(self.get_parameter('tolerance').value)
 
         # Last commanded twist (will be published periodically)
         self.cmd = Twist()
@@ -99,8 +99,8 @@ class WallFollower(Node):
         if self._shutting_down:
             return
 
-        angle_min = math.degrees(scan.angle_min)
-        angle_inc = math.degrees(scan.angle_increment)
+        angle_min = scan.angle_min
+        angle_inc = scan.angle_increment
 
         FRONT      = []
         FR_RIGHT   = []
@@ -128,8 +128,8 @@ class WallFollower(Node):
             # RIGHT: -120° a -60°
             elif -math.radians(120) <= ang < -math.radians(60):
                 RIGHT.append(d)
-            # BACK RIGHT: -180° a -120°
-            elif -math.pi <= ang < -math.radians(120):
+            # BACK RIGHT: -160° a -120°
+            elif -math.radians(160) <= ang < -math.radians(120):
                 BACK_RIGHT.append(d)
             # FRONT LEFT: 20° a 60°
             elif math.radians(20) < ang <= math.radians(60):
@@ -137,8 +137,8 @@ class WallFollower(Node):
             # LEFT: 60° a 120°
             elif math.radians(60) < ang <= math.radians(120):
                 LEFT.append(d)
-            # BACK LEFT: 120° a 180°
-            elif math.radians(120) < ang <= math.pi:
+            # BACK LEFT: 120° a 160°
+            elif math.radians(120) < ang <= math.radians(160):
                 BACK_LEFT.append(d)
             # BACK (opcional: detrás exacta)
             else:
@@ -158,7 +158,73 @@ class WallFollower(Node):
         twist = Twist()
         action = ""
 
-## NOW WE NEED TO MOVE THE ROBOT IN FUNCTION OF THE READINGS
+        mins = {
+            "FRONT":        min_front,
+            "FRONT_RIGHT":  min_fr_right,
+            "RIGHT":        min_right,
+            "BACK_RIGHT":   min_back_right,
+            "BACK":         min_back,
+            "BACK_LEFT":    min_back_left,
+            "LEFT":         min_left,
+            "FRONT_LEFT":   min_fr_left
+        }
+
+        closest_sector = min(mins, key=mins.get)
+        closest_dist = mins[closest_sector]
+
+        action = f"Closest sector = {closest_sector} ({closest_dist:.2f} m)"
+
+        twist = Twist()
+
+        # 1) Si hay obstáculo delante → evitar y doblar izquierda
+        if closest_sector == "FRONT" or min_front < self.base_distance:
+            twist.linear.x = 0.0
+            twist.linear.y = +self.sideSpeed
+            twist.angular.z = +self.rotationSpeed
+            action = "Obstacle front → move LEFT and rotate LEFT"
+
+        else:
+            # Usamos RIGHT y BACK_RIGHT para seguir la pared
+            d_right = min_right
+            d_back_right = min_back_right
+
+            # Si no hay datos válidos, ir recto
+            if not math.isfinite(d_right):
+                d_right = float('inf')
+            if not math.isfinite(d_back_right):
+                d_back_right = float('inf')
+
+            # Error respecto a distancia ideal
+            error_dist = d_right - self.base_distance
+
+            # Estimación de ángulo de pared (inclinación)
+            # pared recta → d_right ≈ d_back_right
+            error_angle = d_right - d_back_right
+
+            # ============================
+            # 2) CONTROL LATERAL (seguir pared derecha)
+            # ============================
+            # error_dist > 0  → estamos lejos → mover derecha
+            # error_dist < 0  → estamos cerca → mover izquierda
+
+            k_side = 0.8
+            twist.linear.y = k_side * (-error_dist) * self.sideSpeed
+
+            # ============================
+            # 3) CONTROL ANGULAR (alinear con pared)
+            # ============================
+            k_ang = 1.2
+            twist.angular.z = -k_ang * error_angle * self.rotationSpeed
+
+            # ============================
+            # 4) AVANZAR SI TODO OK
+            # ============================
+            twist.linear.x = self.forwardSpeed
+
+            action = (
+                f"Following RIGHT wall | dist_err={error_dist:.2f} | "
+                f"angle_err={error_angle:.2f}"
+            )
 
         # Actualizar comando
         self.cmd = twist
