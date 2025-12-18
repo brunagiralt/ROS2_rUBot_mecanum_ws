@@ -7,8 +7,8 @@ from geometry_msgs.msg import Twist
 
 
 class WallFollower(Node):
-    def _init_(self):
-        super()._init_('wall_follower_node')
+    def __init__(self):
+        super().__init__('wall_follower_node')
 
         # Parameters
         self.declare_parameter('distance_limit', 0.5)    # desired distance to right wall
@@ -236,5 +236,5 @@ def main(args=None):
         if rclpy.ok():
             rclpy.shutdown()
 
-if _name_ == '_main_':
+if __name__ == '__main__':
     main()
